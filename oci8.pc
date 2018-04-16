@@ -1,5 +1,6 @@
-libdir=/usr/lib/oracle/12.2/client64/lib
-includedir=/usr/include/oracle/12.2/client64
+prefixdir=/Users/vink/Library/instantclient_12_2
+libdir=${prefixdir}
+includedir=${prefixdir}/sdk/include
 Name: oci8
 Description: oci8 library
 Version: 12.2

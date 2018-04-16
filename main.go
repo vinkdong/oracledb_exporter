@@ -160,6 +160,280 @@ func (e *Exporter) scrape(ch chan<- prometheus.Metric) {
 		e.scrapeErrors.WithLabelValues("sessions").Inc()
 	}
 
+	if err = ScrapeBufferPool(db, ch); err != nil {
+		log.Errorln("Error scraping for buffer:", err)
+		e.scrapeErrors.WithLabelValues("buffer").Inc()
+	}
+
+	if err = ScrapeHitSGA(db, ch); err != nil {
+		log.Errorln("Error scraping for sga hit:", err)
+		e.scrapeErrors.WithLabelValues("sga").Inc()
+	}
+
+	if err = ScrapeUserNumber(db, ch); err != nil {
+		log.Errorln("Error scraping for user number:", err)
+		e.scrapeErrors.WithLabelValues("user_number").Inc()
+	}
+
+	if err = ScrapeResponseTime(db, ch); err != nil {
+		log.Errorln("Error scraping for response time:", err)
+		e.scrapeErrors.WithLabelValues("response_time").Inc()
+	}
+
+	if err = ScrapeAsmDisk(db, ch); err != nil {
+		log.Errorln("Error scraping for asm disk:", err)
+		e.scrapeErrors.WithLabelValues("asm_disk").Inc()
+	}
+
+	if err = ScrapeDateFile(db, ch); err != nil {
+		log.Errorln("Error scraping for data file:", err)
+		e.scrapeErrors.WithLabelValues("date_file").Inc()
+	}
+
+	if err = ScrapeSessionWait(db, ch); err != nil {
+		log.Errorln("Error scraping for session wait time", err)
+		e.scrapeErrors.WithLabelValues("session_wait").Inc()
+	}
+
+	if err = ScrapeForceLog(db, ch); err != nil {
+		log.Errorln("Error scraping for force log", err)
+		e.scrapeErrors.WithLabelValues("force_log").Inc()
+	}
+
+	if err = ScrapeSessionTime(db, ch); err != nil {
+		log.Errorln("Error scraping for session user", err)
+		e.scrapeErrors.WithLabelValues("session_user").Inc()
+	}
+
+	if err = ScrapeTransactionWaitTime(db, ch); err != nil {
+		log.Errorln("Error scraping for transaction wait time", err)
+		e.scrapeErrors.WithLabelValues("transaction").Inc()
+	}
+}
+
+func ScrapeTransactionWaitTime(db *sql.DB, ch chan<- prometheus.Metric) error {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	rows, err = db.Query(`
+select sid, event, blocking_session, last_call_et
+  FROM v$session
+WHERE status = 'ACTIVE'
+AND blocking_session is not null
+`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	transactionDesc := prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "transaction", "wait_time"),
+		"transaction wait time",
+		[]string{"sid","event","blocking_session"}, nil,
+	)
+	for rows.Next() {
+		var sid string
+		var event string
+		var blocking_session string
+		var et float64
+		if err := rows.Scan(&sid,&event,&blocking_session,&et); err != nil {
+			return err
+		}
+		ch <- prometheus.MustNewConstMetric(transactionDesc, prometheus.GaugeValue, float64(et),sid,event,blocking_session)
+	}
+	return nil
+}
+
+func ScrapeSessionTime(db *sql.DB, ch chan<- prometheus.Metric) error {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	rows, err = db.Query(`
+SELECT USERNAME,
+  TERMINAL,
+  PROGRAM,
+  SQL_ID,
+  LOGON_TIME,
+  ROUND((SYSDATE-LOGON_TIME)*(24*60*60),1) as SECONDS_LOGGED_ON,
+  ROUND(LAST_CALL_ET,1) as Seconds_FOR_CURRENT_SQL
+From v$session
+WHERE STATUS='ACTIVE'
+      AND USERNAME IS NOT NULL
+ORDER BY SECONDS_LOGGED_ON DESC
+`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	loggedDesc := prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "sessions", "logged_time"),
+		"logged time unit second",
+		[]string{"username","terminal","program"}, nil,
+	)
+	sqlDesc := prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "sessions", "sql_time"),
+		"current sql time unit second",
+		[]string{"username","terminal","program"}, nil,
+	)
+	for rows.Next() {
+		var username string
+		var terminal string
+		var program string
+		var logged_value float64
+		var current_sql float64
+
+		if err := rows.Scan(&username,&terminal,&program,&logged_value,&current_sql); err != nil {
+			return err
+		}
+
+		ch <- prometheus.MustNewConstMetric(loggedDesc, prometheus.GaugeValue, float64(logged_value),username,terminal,program)
+		ch <- prometheus.MustNewConstMetric(sqlDesc,prometheus.GaugeValue,float64(current_sql),username,terminal,program)
+	}
+	return nil
+}
+
+func ScrapeSessionWait(db *sql.DB, ch chan<- prometheus.Metric) error {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	rows, err = db.Query(`
+SELECT
+  s.SID,
+  s.USERNAME,
+  sum(ash.WAIT_TIME + ash.TIME_WAITED) total_wait_time
+FROM v$active_session_history ash, v$session s
+WHERE ash.SESSION_ID = s.SID
+GROUP BY s.SID, s.USERNAME
+ORDER BY total_wait_time DESC
+`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	bufferDesc := prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "session", "wait_second"),
+		"session wait second",
+		[]string{"sid","username"}, nil,
+	)
+	for rows.Next() {
+		var sid string
+		var username string
+		var value float64
+
+		if err := rows.Scan(&sid,&username,&value); err != nil {
+			return err
+		}
+		ch <- prometheus.MustNewConstMetric(bufferDesc, prometheus.GaugeValue, float64(value), sid, username)
+	}
+	return nil
+}
+
+func ScrapeForceLog(db *sql.DB, ch chan<- prometheus.Metric) error {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	rows, err = db.Query(`
+SELECT force_logging
+FROM v$database
+`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	bufferDesc := prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "force", "log"),
+		"force log",
+		[]string{}, nil,
+	)
+	for rows.Next() {
+		var forceLogging string
+
+		if err := rows.Scan(&forceLogging); err != nil {
+			return err
+		}
+
+		value := 0
+		if forceLogging == "YES"{
+			value = 1
+		}
+		ch <- prometheus.MustNewConstMetric(bufferDesc, prometheus.GaugeValue, float64(value))
+	}
+	return nil
+}
+
+func ScrapeDateFile(db *sql.DB, ch chan<- prometheus.Metric) error {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	rows, err = db.Query(`
+select file#,name,status from v$datafile WHERE status != 'SYSTEM'
+`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	bufferDesc := prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "data_file", "status"),
+		"data file status",
+		[]string{"file","filename"}, nil,
+	)
+	for rows.Next() {
+		var file string
+		var filename string
+		var status string
+
+		if err := rows.Scan(&file,&filename,&status); err != nil {
+			return err
+		}
+		filename = cleanName(filename)
+		value := 0
+		if status == "ONLINE" {
+			value = 1
+		}
+		ch <- prometheus.MustNewConstMetric(bufferDesc, prometheus.GaugeValue, float64(value), file, filename)
+	}
+	return nil
+}
+
+func ScrapeAsmDisk(db *sql.DB, ch chan<- prometheus.Metric) error {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	rows, err = db.Query(`
+select group_number,name, (1- free_mb/total_mb) as used_pencentage from v$asm_diskgroup
+`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	bufferDesc := prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "asm", "disk_usage"),
+		"asm disk usage",
+		[]string{"type","group_name"}, nil,
+	)
+	for rows.Next() {
+		var group_name string
+		var name string
+		var value float64
+
+		if err := rows.Scan(&group_name,&name,&value); err != nil {
+			return err
+		}
+		name = cleanName(name)
+		ch <- prometheus.MustNewConstMetric(bufferDesc, prometheus.GaugeValue, float64(value), name, group_name)
+	}
+	return nil
 }
 
 // ScrapeSessions collects session metrics from the v$session view.
@@ -392,6 +666,140 @@ WHERE
 		ch <- prometheus.MustNewConstMetric(tablespaceBytesDesc, prometheus.GaugeValue, float64(bytes), tablespace_name, contents)
 		ch <- prometheus.MustNewConstMetric(tablespaceMaxBytesDesc, prometheus.GaugeValue, float64(max_bytes), tablespace_name, contents)
 		ch <- prometheus.MustNewConstMetric(tablespaceFreeBytesDesc, prometheus.GaugeValue, float64(bytes_free), tablespace_name, contents)
+	}
+	return nil
+}
+
+func ScrapeBufferPool(db *sql.DB, ch chan<- prometheus.Metric) error {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	rows, err = db.Query(`
+SELECT NAME, 
+  PHYSICAL_READS, 
+  DB_BLOCK_GETS, 
+  CONSISTENT_GETS, 
+  1 - (PHYSICAL_READS / (DB_BLOCK_GETS + CONSISTENT_GETS)) "Hit Ratio" 
+FROM V$BUFFER_POOL_STATISTICS 
+`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	bufferDesc := prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "buffer", "hits"),
+		"buffer hits percentage.",
+		[]string{"table"}, nil,
+	)
+	for rows.Next() {
+		var name string
+		var physical_reads float64
+		var db_block_gets float64
+		var consistent_gets float64
+		var hit_ratio float64
+
+		if err := rows.Scan(&name, &physical_reads, &db_block_gets, &consistent_gets, &hit_ratio); err != nil {
+			return err
+		}
+		name = cleanName(name)
+		ch <- prometheus.MustNewConstMetric(bufferDesc, prometheus.GaugeValue, float64(hit_ratio), name)
+	}
+	return nil
+}
+
+func ScrapeHitSGA(db *sql.DB, ch chan<- prometheus.Metric) error {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	rows, err = db.Query(`
+SELECT SUM(pinhits)/sum(pins)  FROM V$LIBRARYCACHE
+`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	bufferDesc := prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "sga", "hits"),
+		"sga hits percentage.",
+		[]string{}, nil,
+	)
+	for rows.Next() {
+		var hit_ratio float64
+
+		if err := rows.Scan(&hit_ratio); err != nil {
+			return err
+		}
+		ch <- prometheus.MustNewConstMetric(bufferDesc, prometheus.GaugeValue, float64(hit_ratio))
+	}
+	return nil
+}
+
+func ScrapeUserNumber(db *sql.DB, ch chan<- prometheus.Metric) error {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	rows, err = db.Query(`
+select count(1) from dba_users
+`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	bufferDesc := prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "user", "number"),
+		"user number.",
+		[]string{}, nil,
+	)
+	for rows.Next() {
+		var number float64
+
+		if err := rows.Scan(&number); err != nil {
+			return err
+		}
+		ch <- prometheus.MustNewConstMetric(bufferDesc, prometheus.GaugeValue, float64(number))
+	}
+	return nil
+}
+
+func ScrapeResponseTime(db *sql.DB, ch chan<- prometheus.Metric) error {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	rows, err = db.Query(`
+select  METRIC_NAME,
+  VALUE
+from    SYS.V_$SYSMETRIC
+where   METRIC_NAME IN ('Database CPU Time Ratio',
+                        'Database Wait Time Ratio') AND
+        INTSIZE_CSEC =
+        (select max(INTSIZE_CSEC) from SYS.V_$SYSMETRIC)
+`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	bufferDesc := prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "response", "time"),
+		"database response time.",
+		[]string{"type"}, nil,
+	)
+	for rows.Next() {
+		var name string
+		var value float64
+
+		if err := rows.Scan(&name,&value); err != nil {
+			return err
+		}
+		name = cleanName(name)
+		ch <- prometheus.MustNewConstMetric(bufferDesc, prometheus.GaugeValue, float64(value),name)
 	}
 	return nil
 }
